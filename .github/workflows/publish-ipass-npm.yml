@@ -142,6 +142,15 @@ jobs:
             https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli.git \
             "+refs/tags/v${UPSTREAM_VERSION}:refs/tags/v${UPSTREAM_VERSION}"
 
+      - name: Create an ephemeral release tag for build-only runs
+        if: github.event_name != 'push'
+        shell: bash
+        env:
+          NPM_VERSION: ${{ needs.version.outputs.npm_version }}
+        run: |
+          set -euo pipefail
+          git tag --force "v${NPM_VERSION}" "$GITHUB_SHA"
+
       # post-goreleaser.sh signs both Darwin archives. Fork builds use
       # rcodesign's ad-hoc mode when no Apple Developer ID secret is present.
       - name: Install rcodesign
