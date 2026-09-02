@@ -92,8 +92,10 @@ if (process.env.DWS_NPM_PUBLISH_VALIDATE_ONLY === "1") {
 
 async function exactVersionIsVisible(packageName) {
   const packagePath = encodeURIComponent(packageName);
-  const versionPath = encodeURIComponent(version);
-  const url = `${registry}/${packagePath}/${versionPath}?dws_check=${Date.now()}`;
+  // npm install resolves the full package index (packument), which can lag the
+  // exact-version endpoint during registry propagation. Gate on the same index
+  // so a successful workflow means a clean client can actually resolve it.
+  const url = `${registry}/${packagePath}`;
   try {
     const response = await fetch(url, {
       headers: {
@@ -107,8 +109,11 @@ async function exactVersionIsVisible(packageName) {
       console.warn(`Registry visibility check for ${packageName} returned HTTP ${response.status}.`);
       return false;
     }
-    const manifest = await response.json();
-    return manifest.name === packageName && manifest.version === version;
+    const packument = await response.json();
+    return (
+      packument.name === packageName &&
+      packument.versions?.[version]?.version === version
+    );
   } catch (error) {
     console.warn(
       `Registry visibility check for ${packageName} failed transiently: ${error instanceof Error ? error.message : String(error)}`,
