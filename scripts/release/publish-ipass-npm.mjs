@@ -122,6 +122,23 @@ async function exactVersionIsVisible(packageName) {
   }
 }
 
+async function exactVersionIsAccepted(packageName) {
+  const packagePath = encodeURIComponent(packageName);
+  const versionPath = encodeURIComponent(version);
+  const url = `${registry}/${packagePath}/${versionPath}?dws_acceptance=${Date.now()}`;
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json", "cache-control": "no-cache" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) return false;
+    const manifest = await response.json();
+    return manifest.name === packageName && manifest.version === version;
+  } catch {
+    return false;
+  }
+}
+
 function printPublishOutput(result) {
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
@@ -176,6 +193,12 @@ function throwIfStaged(packageNames) {
 async function publishIfMissing(entry) {
   if (await exactVersionIsVisible(entry.name)) {
     console.log(`Skipping ${entry.name}@${version}: already public.`);
+    return;
+  }
+  if (await exactVersionIsAccepted(entry.name)) {
+    console.log(
+      `Skipping ${entry.name}@${version}: npm accepted it and its installable package index is still propagating.`,
+    );
     return;
   }
 
