@@ -22,6 +22,12 @@ const prepareScript = join(
   "release",
   "prepare-ipass-npm-release.mjs",
 );
+const publishScript = join(
+  repoRoot,
+  "scripts",
+  "release",
+  "publish-ipass-npm.mjs",
+);
 const upstreamVersion = readFileSync(
   join(repoRoot, "build", "npm-ipass", "upstream-version.txt"),
   "utf8",
@@ -89,6 +95,19 @@ test("prepares one root package and all platform packages", () => {
       );
     }
 
+    const validated = spawnSync(process.execPath, [publishScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DWS_NPM_OUTPUT_ROOT: outputRoot,
+        DWS_NPM_PUBLISH_VALIDATE_ONLY: "1",
+        NPM_VERSION: version,
+      },
+    });
+    assert.equal(validated.status, 0, validated.error?.message || validated.stderr);
+    assert.match(validated.stdout, /Validated seven npm staging packages/);
+
     const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
     const packRoot = join(sandbox, "packs");
     mkdirSync(packRoot, { recursive: true });
@@ -137,6 +156,46 @@ test("rejects a version from a different upstream baseline", () => {
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(`expected ${upstreamVersion.replaceAll(".", "\\.")}-ipass`));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("publisher validation rejects lifecycle scripts", () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "dws-ipass-npm-scripts-"));
+  const artifactRoot = join(sandbox, "artifacts");
+  const outputRoot = join(sandbox, "npm");
+  try {
+    createFakeArtifacts(artifactRoot);
+    const prepared = spawnSync(process.execPath, [prepareScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DWS_NPM_ARTIFACT_ROOT: artifactRoot,
+        DWS_NPM_OUTPUT_ROOT: outputRoot,
+        NPM_VERSION: version,
+      },
+    });
+    assert.equal(prepared.status, 0, prepared.stderr);
+
+    const manifestPath = join(outputRoot, "root", "package.json");
+    const manifest = readJson(manifestPath);
+    manifest.scripts = { prepublishOnly: "node steal-token.mjs" };
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const validated = spawnSync(process.execPath, [publishScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DWS_NPM_OUTPUT_ROOT: outputRoot,
+        DWS_NPM_PUBLISH_VALIDATE_ONLY: "1",
+        NPM_VERSION: version,
+      },
+    });
+    assert.notEqual(validated.status, 0);
+    assert.match(validated.stderr, /must not contain lifecycle scripts/);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

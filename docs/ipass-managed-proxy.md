@@ -84,3 +84,5 @@ dws skill setup
 5. 验证通过后创建 `v<上游版本>-ipass.<序号>` tag；tag 流水线会先发布六个平台包，再发布根包。
 
 仓库需要配置 Actions Secret `NPM_TOKEN`。令牌只应直接写入 GitHub 仓库 Secret，不能提交到代码、日志或聊天记录中。手动工作流默认只构建和打包；只有显式启用 `publish_to_npm` 或推送匹配的定制 tag 才会发布。
+
+npm 接受包后，公共注册表偶尔需要较长时间才能查询到新版本。正式流水线会先提交六个平台包，并行等待它们全部公开后再提交根包。如果任务在 npm 已接受部分包后中断，不要移动 tag，也不要重新编译同一版本；手动运行 `Resume Yingdao iPaaS DWS npm publication`，填写原正式 tag 流水线的 `source_run_id` 和原 `npm_version`。恢复任务只复用该 tag 任务的不可变 `npm-staging`，校验来源、版本和包清单，跳过已经公开的包后继续发布。
