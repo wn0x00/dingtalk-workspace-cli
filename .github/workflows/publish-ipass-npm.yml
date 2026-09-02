@@ -97,6 +97,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The publisher passes --registry itself. setup-node@v6 registry-url would
+      # inject a dummy NODE_AUTH_TOKEN and disable our tokenless OIDC guard.
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -132,6 +134,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Keep recovery tokenless too; see the publish job above.
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -411,7 +414,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
       - name: Pin OIDC-capable npm CLI
@@ -451,7 +453,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
       - name: Pin OIDC-capable npm CLI
