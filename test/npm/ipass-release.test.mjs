@@ -34,6 +34,7 @@ const upstreamVersion = readFileSync(
 ).trim();
 const version = `${upstreamVersion}-ipass.1`;
 const rootPackageName = "@guanzhu.me/dingtalk-workspace-cli";
+const repositoryUrl = "git+https://github.com/wn0x00/dingtalk-workspace-cli.git";
 const platforms = [
   { id: "darwin-arm64", os: "darwin", cpu: "arm64", binary: "dws" },
   { id: "darwin-x64", os: "darwin", cpu: "x64", binary: "dws" },
@@ -78,6 +79,7 @@ test("prepares one root package and all platform packages", () => {
     assert.equal(rootManifest.name, rootPackageName);
     assert.equal(rootManifest.version, version);
     assert.deepEqual(rootManifest.bin, { dws: "bin/dws.js" });
+    assert.equal(rootManifest.repository?.url, repositoryUrl);
     assert.equal(Object.keys(rootManifest.optionalDependencies).length, platforms.length);
     assert.equal(statSync(join(outputRoot, "root", "bin", "dws.js")).size > 0, true);
 
@@ -89,6 +91,7 @@ test("prepares one root package and all platform packages", () => {
       assert.equal(manifest.version, version);
       assert.deepEqual(manifest.os, [platform.os]);
       assert.deepEqual(manifest.cpu, [platform.cpu]);
+      assert.equal(manifest.repository?.url, repositoryUrl);
       assert.equal(
         statSync(join(outputRoot, platform.id, "bin", platform.binary)).size > 0,
         true,
@@ -196,6 +199,55 @@ test("publisher validation rejects lifecycle scripts", () => {
     });
     assert.notEqual(validated.status, 0);
     assert.match(validated.stderr, /must not contain lifecycle scripts/);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("publisher requires tokenless GitHub Actions OIDC", () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "dws-ipass-npm-oidc-"));
+  const artifactRoot = join(sandbox, "artifacts");
+  const outputRoot = join(sandbox, "npm");
+  try {
+    createFakeArtifacts(artifactRoot);
+    const prepared = spawnSync(process.execPath, [prepareScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DWS_NPM_ARTIFACT_ROOT: artifactRoot,
+        DWS_NPM_OUTPUT_ROOT: outputRoot,
+        NPM_VERSION: version,
+      },
+    });
+    assert.equal(prepared.status, 0, prepared.stderr);
+
+    const oidcEnvironment = {
+      ...process.env,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "test-request-token",
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://token.actions.githubusercontent.test/oidc",
+      DWS_NPM_OIDC_PREFLIGHT_ONLY: "1",
+      DWS_NPM_OUTPUT_ROOT: outputRoot,
+      GITHUB_ACTIONS: "true",
+      NPM_VERSION: version,
+    };
+    delete oidcEnvironment.NODE_AUTH_TOKEN;
+
+    const accepted = spawnSync(process.execPath, [publishScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: oidcEnvironment,
+    });
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.match(accepted.stdout, /tokenless GitHub Actions OIDC/);
+
+    const rejected = spawnSync(process.execPath, [publishScript], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...oidcEnvironment, NODE_AUTH_TOKEN: "legacy-long-lived-token" },
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /NODE_AUTH_TOKEN must be empty/);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

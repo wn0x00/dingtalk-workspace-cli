@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const rootPackageName = "@guanzhu.me/dingtalk-workspace-cli";
+const repositoryUrl = "git+https://github.com/wn0x00/dingtalk-workspace-cli.git";
 const platforms = [
   "darwin-arm64",
   "darwin-x64",
@@ -64,6 +65,11 @@ function loadManifest(packageDir, expectedName) {
   ) {
     throw new Error(`Publishing packages must not contain lifecycle scripts: ${manifestPath}`);
   }
+  if (manifest.repository?.url !== repositoryUrl) {
+    throw new Error(
+      `Package repository must be ${repositoryUrl} for npm OIDC trusted publishing: ${manifestPath}`,
+    );
+  }
   return manifest;
 }
 
@@ -87,6 +93,22 @@ for (const entry of packages) {
 
 console.log(`Validated seven npm staging packages for ${rootPackageName}@${version}.`);
 if (process.env.DWS_NPM_PUBLISH_VALIDATE_ONLY === "1") {
+  process.exit(0);
+}
+
+if (process.env.GITHUB_ACTIONS !== "true") {
+  throw new Error("npm publication is restricted to GitHub Actions OIDC.");
+}
+if ((process.env.NODE_AUTH_TOKEN || "").trim() !== "") {
+  throw new Error("NODE_AUTH_TOKEN must be empty; npm publication uses OIDC only.");
+}
+for (const name of ["ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"]) {
+  if (!(process.env[name] || "").trim()) {
+    throw new Error(`Missing ${name}; grant the publish job id-token: write.`);
+  }
+}
+console.log("Verified tokenless GitHub Actions OIDC publishing environment.");
+if (process.env.DWS_NPM_OIDC_PREFLIGHT_ONLY === "1") {
   process.exit(0);
 }
 

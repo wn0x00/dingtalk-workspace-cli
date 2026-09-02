@@ -19,6 +19,10 @@ const outputRoot = resolve(
 );
 
 const rootPackageName = "@guanzhu.me/dingtalk-workspace-cli";
+const repository = {
+  type: "git",
+  url: "git+https://github.com/wn0x00/dingtalk-workspace-cli.git",
+};
 const upstreamVersionFile = join(
   repoRoot,
   "build",
@@ -104,6 +108,7 @@ for (const platform of platforms) {
     engines: { node: ">=18" },
     os: [platform.os],
     cpu: [platform.cpu],
+    repository,
     publishConfig: { access: "public" },
   });
   copyLegalFiles(packageDir);
@@ -127,10 +132,7 @@ writeJson(join(rootDir, "package.json"), {
   keywords: ["dingtalk", "dws", "cli", "ipass", "base-url"],
   homepage: "https://github.com/wn0x00/dingtalk-workspace-cli#readme",
   bugs: { url: "https://github.com/wn0x00/dingtalk-workspace-cli/issues" },
-  repository: {
-    type: "git",
-    url: "https://github.com/wn0x00/dingtalk-workspace-cli.git",
-  },
+  repository,
   license: "Apache-2.0",
   type: "module",
   bin: { dws: "bin/dws.js" },

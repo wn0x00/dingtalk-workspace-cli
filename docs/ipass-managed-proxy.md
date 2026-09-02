@@ -83,6 +83,8 @@ dws skill setup
 4. 先在 GitHub Actions 手动运行 `Build and publish Yingdao iPaaS DWS npm packages`，保持 `publish_to_npm=false`，验证六平台构建。
 5. 验证通过后创建 `v<上游版本>-ipass.<序号>` tag；tag 流水线会先发布六个平台包，再发布根包。
 
-仓库需要配置 Actions Secret `NPM_TOKEN`。令牌只应直接写入 GitHub 仓库 Secret，不能提交到代码、日志或聊天记录中。手动工作流默认只构建和打包；只有显式启用 `publish_to_npm` 或推送匹配的定制 tag 才会发布。
+发布使用 npm Trusted Publishing（OIDC），不读取 `NPM_TOKEN` 或 `NODE_AUTH_TOKEN`。7 个 npm 包都需要一次性绑定同一个 Trusted Publisher：GitHub 用户 `wn0x00`、仓库 `dingtalk-workspace-cli`、工作流文件 `publish-ipass-npm.yml`、不配置 Environment、允许 `npm publish`。绑定后，每次发布由 GitHub 托管 runner 获取短期 OIDC 身份，公开包会自动带 npm provenance。
 
-npm 接受包后，公共注册表偶尔需要较长时间才能查询到新版本。正式流水线会先提交六个平台包，并行等待它们全部公开后再提交根包。如果任务在 npm 已接受部分包后中断，不要移动 tag，也不要重新编译同一版本；手动运行 `Resume Yingdao iPaaS DWS npm publication`，填写原正式 tag 流水线的 `source_run_id` 和原 `npm_version`。恢复任务只复用该 tag 任务的不可变 `npm-staging`，校验来源、版本和包清单，跳过已经公开的包后继续发布。
+手动工作流默认只构建和打包；只有显式启用 `publish_to_npm` 或推送匹配的定制 tag 才会发布。发布 job 固定使用 Node 24 和 npm 11.19.1，并且只授予 `contents: read`、`actions: read`、`id-token: write`。
+
+npm 接受包后，公共注册表偶尔需要较长时间才能查询到新版本。正式流水线会先提交六个平台包，并行等待它们全部公开后再提交根包。如果任务在 npm 已接受部分包后中断，不要移动 tag，也不要重新编译同一版本；仍然手动运行 `Build and publish Yingdao iPaaS DWS npm packages`，但必须选择原版本 tag 作为运行分支，填写原 `npm_version` 和正式 tag 流水线的 `resume_run_id`，并启用 `publish_to_npm`。同一工作流会复用该 tag 任务的不可变 `npm-staging`，校验当前 ref、提交、来源、版本和包清单，跳过已经公开的包后继续通过 OIDC 发布。

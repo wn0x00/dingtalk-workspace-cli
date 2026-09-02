@@ -13,6 +13,10 @@ on:
         required: true
         default: false
         type: boolean
+      resume_run_id:
+        description: "Optional failed tag run id whose immutable npm-staging should be resumed"
+        required: false
+        type: string
   push:
     tags:
       - "v*-ipass.*"
@@ -82,6 +86,7 @@ jobs:
 
   verify:
     name: Verify managed proxy and npm staging
+    if: github.event_name != 'workflow_dispatch' || inputs.resume_run_id == ''
     needs: version
     runs-on: ubuntu-latest
     steps:
@@ -388,10 +393,18 @@ jobs:
 
   publish:
     name: Publish platform packages, then root package
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_npm)
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.publish_to_npm &&
+       inputs.resume_run_id == '')
     needs: [version, prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -401,26 +414,131 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Pin OIDC-capable npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.19.1 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = "11.19.1"
+
       - name: Download npm staging
         uses: actions/download-artifact@v7
         with:
           name: npm-staging
           path: .release/npm
 
-      - name: Validate npm token
-        shell: bash
+      - name: Publish exact version with npm OIDC
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_VERSION: ${{ needs.version.outputs.npm_version }}
+        run: node scripts/release/publish-ipass-npm.mjs
+
+  resume-publish:
+    name: Resume exact npm version from immutable staging
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish_to_npm &&
+      inputs.resume_run_id != ''
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Pin OIDC-capable npm CLI
+        shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo "Missing repository secret NPM_TOKEN." >&2
-            exit 1
-          fi
-          npm whoami --registry https://registry.npmjs.org >/dev/null
+          npm install --global npm@11.19.1 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = "11.19.1"
 
-      - name: Publish exact version idempotently
+      - name: Validate recovery inputs
+        shell: bash
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.resume_run_id }}
+          NPM_VERSION: ${{ needs.version.outputs.npm_version }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "resume_run_id must be a positive GitHub Actions run id." >&2
+            exit 1
+          }
+
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          RUN_JSON="$run_json" NPM_VERSION="$NPM_VERSION" node <<'NODE'
+          const run = JSON.parse(process.env.RUN_JSON);
+          const expected = {
+            status: "completed",
+            event: "push",
+            head_branch: `v${process.env.NPM_VERSION}`,
+            path: ".github/workflows/publish-ipass-npm.yml",
+          };
+          for (const [field, value] of Object.entries(expected)) {
+            if (run[field] !== value) {
+              throw new Error(
+                `Source run ${run.id} has unexpected ${field}: ${JSON.stringify(run[field])}; expected ${JSON.stringify(value)}`,
+              );
+            }
+          }
+          if (!["success", "failure"].includes(run.conclusion)) {
+            throw new Error(
+              `Source run ${run.id} must have a final success or failure conclusion; received ${JSON.stringify(run.conclusion)}`,
+            );
+          }
+          if (!/^[0-9a-f]{40}$/.test(run.head_sha || "")) {
+            throw new Error(`Source run ${run.id} has an invalid head SHA.`);
+          }
+          NODE
+          run_sha="$(RUN_JSON="$run_json" node -p 'JSON.parse(process.env.RUN_JSON).head_sha')"
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/v${NPM_VERSION}" --jq .sha)"
+          [[ "$run_sha" == "$tag_sha" ]] || {
+            echo "Source run SHA does not match the current v${NPM_VERSION} tag." >&2
+            exit 1
+          }
+          [[ "$GITHUB_REF" == "refs/tags/v${NPM_VERSION}" ]] || {
+            echo "Recovery must be dispatched from ref v${NPM_VERSION}; received ${GITHUB_REF}." >&2
+            exit 1
+          }
+          [[ "$GITHUB_SHA" == "$run_sha" ]] || {
+            echo "Recovery workflow SHA does not match the immutable source run SHA." >&2
+            exit 1
+          }
+
+          artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts")"
+          ARTIFACT_JSON="$artifact_json" node <<'NODE'
+          const response = JSON.parse(process.env.ARTIFACT_JSON);
+          const candidates = (response.artifacts || []).filter(
+            (artifact) => artifact.name === "npm-staging" && artifact.expired === false,
+          );
+          if (candidates.length !== 1) {
+            throw new Error(
+              `Source run must contain exactly one unexpired npm-staging artifact; found ${candidates.length}.`,
+            );
+          }
+          NODE
+          echo "Verified source run ${SOURCE_RUN_ID} for tag v${NPM_VERSION}."
+
+      - name: Download immutable npm staging from the build run
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-staging
+          path: .release/npm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.resume_run_id }}
+
+      - name: Resume exact version with npm OIDC
+        env:
           NPM_VERSION: ${{ needs.version.outputs.npm_version }}
         run: node scripts/release/publish-ipass-npm.mjs
