@@ -1,5 +1,7 @@
 <h1 align="center">DingTalk Workspace CLI (dws)</h1>
 
+> 本 fork 发布影刀 iPaaS 托管授权版本。请先阅读 [BASE_URL 方案、安装与持续发布说明](./docs/ipass-managed-proxy.md)。
+
 <p align="center"><code>dws</code> — 钉钉工作台命令行工具，为人类和 AI Agent 而生。</p>
 
 <p align="center">

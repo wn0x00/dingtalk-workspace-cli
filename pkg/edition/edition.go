@@ -141,6 +141,15 @@ type Hooks struct {
 	StaticServers         func() []ServerInfo                          // non-nil → skip Market discovery
 	VisibleProducts       func() []string                              // non-nil → override help visibility
 	RegisterExtraCommands func(root *cobra.Command, caller ToolCaller) // register overlay-only commands
+	// DisableMCPURLOverrides prevents DINGTALK_<PRODUCT>_MCP_URL from
+	// superseding edition-owned endpoints. Managed proxy editions use this to
+	// keep every built-in business request on their reviewed route.
+	DisableMCPURLOverrides bool
+	// AllowAnonymousMCP authorizes a built-in product to call one exact HTTP
+	// endpoint without resolving or attaching a DingTalk OAuth token. The hook
+	// is evaluated at the execution boundary after endpoint resolution. It must
+	// fail closed for every endpoint the edition does not own.
+	AllowAnonymousMCP func(productID, endpoint string) bool
 
 	// --- discovery ---
 

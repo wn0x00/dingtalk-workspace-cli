@@ -233,8 +233,10 @@ func (r *runtimeRunner) runSingle(ctx context.Context, invocation executor.Invoc
 	// Mock mode: skip endpoint resolution, use a placeholder endpoint.
 	if r.globalFlags != nil && r.globalFlags.Mock {
 		endpoint := fmt.Sprintf("https://mock-mcp-%s.dingtalk.com", invocation.CanonicalProduct)
-		if override, ok := productEndpointOverride(invocation.CanonicalProduct); ok {
-			endpoint = override
+		if !edition.Get().DisableMCPURLOverrides {
+			if override, ok := productEndpointOverride(invocation.CanonicalProduct); ok {
+				endpoint = override
+			}
 		}
 		return r.executeInvocation(ctx, endpoint, invocation)
 	}
@@ -242,7 +244,7 @@ func (r *runtimeRunner) runSingle(ctx context.Context, invocation executor.Invoc
 	// Prefetch the Keychain token in the background. Keychain access costs
 	// ~70ms on macOS; starting it here lets the load overlap with endpoint
 	// resolution below.
-	if prefetchToken {
+	if prefetchToken && edition.Get().AllowAnonymousMCP == nil {
 		go func() {
 			_, _ = runnerGetCachedRuntimeToken(ctx)
 		}()
@@ -538,11 +540,12 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	// plugin has an ownership record; credentials within that record are
 	// optional. Plugin requests never fall back to the default DingTalk OAuth.
 	pluginAuth, hasPluginAuth := LookupPluginAuth(invocation.CanonicalProduct)
+	managedAnonymous := !hasPluginAuth && editionAllowsAnonymousMCP(invocation.CanonicalProduct, endpoint)
 
 	authToken := ""
 	if hasPluginAuth {
 		authToken = pluginAuth.Token
-	} else if !invocation.DryRun && (r.globalFlags == nil || !r.globalFlags.Mock) {
+	} else if !managedAnonymous && !invocation.DryRun && (r.globalFlags == nil || !r.globalFlags.Mock) {
 		snapshot, tokenErr := runnerResolveAuthSnapshot(r, ctx)
 		if tokenErr != nil {
 			return executor.Result{}, tokenResolutionError(tokenErr)
@@ -602,7 +605,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	// Preserve a final execution-boundary guard even though the built-in token
 	// resolver normally returns either a non-empty token or an error. HTTP
 	// plugins are ownership-scoped separately and may intentionally be anonymous.
-	if !hasPluginAuth && strings.TrimSpace(authToken) == "" {
+	if !hasPluginAuth && !managedAnonymous && strings.TrimSpace(authToken) == "" {
 		return executor.Result{}, apperrors.NewAuth(
 			"未登录，请先执行 dws auth login",
 			apperrors.WithReason("not_authenticated"),
@@ -638,12 +641,12 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 
 	if err := runnerPreflightDocDownload(r, callCtx, tc, endpoint, invocation); err != nil {
 		if patCheck := apperrors.AsPatAuthCheckError(err); patCheck != nil {
-			if IsPatRetrying(ctx) {
+			if managedAnonymous || IsPatRetrying(ctx) {
 				return executor.Result{}, patCheck
 			}
 			return runnerHandlePatAuthCheck(ctx, r, invocation, patCheck, defaultConfigDir(), os.Stderr)
 		}
-		if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, err, hasPluginAuth); handled {
+		if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, err, hasPluginAuth || managedAnonymous); handled {
 			if retryErr != nil {
 				runnerCaptureRuntimeFailure(invocation, err, retryErr)
 			}
@@ -657,10 +660,10 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	callResult, err := runnerCallTool(tc, callCtx, endpoint, invocation.Tool, invocation.Params)
 	RecordTiming(ctx, "mcp_call", time.Since(callStart))
 	if err != nil {
-		if isRefreshableTransportAuthError(err) {
+		if !managedAnonymous && isRefreshableTransportAuthError(err) {
 			if fn := edition.Get().OnAuthError; fn != nil {
 				if overrideErr := fn(defaultConfigDir(), err); overrideErr != nil {
-					if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, overrideErr, hasPluginAuth); handled {
+					if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, overrideErr, hasPluginAuth || managedAnonymous); handled {
 						if retryErr != nil {
 							runnerCaptureRuntimeFailure(invocation, err, retryErr)
 						}
@@ -672,7 +675,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 			}
 		}
 		// PAT scope error: offer human-readable output and retry after authorization
-		if isPatScopeError(err) {
+		if !managedAnonymous && isPatScopeError(err) {
 			scopeErr := extractPatScopeError(err)
 			runnerCaptureRuntimeFailure(invocation, err, err)
 			return runnerRetryWithPatAuthRetry(ctx, r, invocation, scopeErr, defaultConfigDir(), os.Stderr)
@@ -685,12 +688,12 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	if fn := edition.Get().ClassifyToolResult; fn != nil {
 		if editionErr := fn(callResult.Content); editionErr != nil {
 			if patCheck := apperrors.AsPatAuthCheckError(editionErr); patCheck != nil {
-				if IsPatRetrying(ctx) {
+				if managedAnonymous || IsPatRetrying(ctx) {
 					return executor.Result{}, patCheck // already retried once, don't loop
 				}
 				return runnerHandlePatAuthCheck(ctx, r, invocation, patCheck, defaultConfigDir(), os.Stderr)
 			}
-			if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, editionErr, hasPluginAuth); handled {
+			if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, editionErr, hasPluginAuth || managedAnonymous); handled {
 				if retryErr != nil {
 					runnerCaptureRuntimeFailure(invocation, editionErr, retryErr)
 				}
@@ -702,7 +705,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 
 	// ---- Structured PAT auth check (open-source fallback) ----
 	if patCheck := apperrors.ClassifyPatAuthCheck(callResult.Content); patCheck != nil {
-		if IsPatRetrying(ctx) {
+		if managedAnonymous || IsPatRetrying(ctx) {
 			return executor.Result{}, patCheck // already retried once, don't loop
 		}
 		return runnerHandlePatAuthCheck(ctx, r, invocation, patCheck, defaultConfigDir(), os.Stderr)
@@ -715,7 +718,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 		// patterns (PAT permission, gateway-auth) before generic handling.
 		if classify := edition.Get().ClassifyToolResult; classify != nil {
 			if hookErr := classify(callResult.Content); hookErr != nil {
-				if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, hookErr, hasPluginAuth); handled {
+				if result, retryErr, handled := r.retryAuthRefreshRequired(ctx, endpoint, invocation, authToken, hookErr, hasPluginAuth || managedAnonymous); handled {
 					if retryErr != nil {
 						runnerCaptureRuntimeFailure(invocation, hookErr, retryErr)
 					}
@@ -736,7 +739,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 		)
 		logBusinessError(r.transport.FileLogger, serverFailureReason(mcpErr, "mcp_tool_error"), invocation, callResult.Content, diag)
 		// PAT scope error in business response: offer human-readable output and retry
-		if isPatScopeError(mcpErr) {
+		if !managedAnonymous && isPatScopeError(mcpErr) {
 			scopeErr := extractPatScopeError(mcpErr)
 			runnerCaptureRuntimeFailure(invocation, mcpErr, mcpErr)
 			return runnerRetryWithPatAuthRetry(ctx, r, invocation, scopeErr, defaultConfigDir(), os.Stderr)

@@ -1,5 +1,6 @@
 __pycache__/
 dist/
+.release/
 .tmp-bin/
 .worktrees/
 .pytest_cache/

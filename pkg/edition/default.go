@@ -28,7 +28,7 @@ const DefaultOSSClawType = "openClaw"
 // changes claw-type. All other fields are nil — the internal code interprets
 // nil as "use standard open-source behaviour".
 func defaultHooks() *Hooks {
-	return &Hooks{
+	hooks := &Hooks{
 		Name: "open",
 		MergeHeaders: func(base map[string]string) map[string]string {
 			if base == nil {
@@ -41,6 +41,7 @@ func defaultHooks() *Hooks {
 		SupplementServers: openSupplementServers,
 		VisibleProducts:   openVisibleProducts,
 	}
+	return configureManagedProxyHooks(hooks)
 }
 
 // openSupplementServers returns explicitly wired MCP endpoints owned by the

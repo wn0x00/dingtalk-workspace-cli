@@ -1,0 +1,512 @@
+name: Build and publish Yingdao iPaaS DWS npm packages
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      npm_version:
+        description: "Custom npm version; leave blank to use upstream-version-ipass.1"
+        required: false
+        type: string
+      publish_to_npm:
+        description: "Publish after build and pack validation"
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*-ipass.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipass-npm-${{ github.event_name }}-${{ github.ref }}-${{ inputs.npm_version || 'default' }}
+  cancel-in-progress: false
+
+env:
+  NPM_PACKAGE: "@guanzhu.me/dingtalk-workspace-cli"
+
+jobs:
+  version:
+    name: Resolve npm version
+    runs-on: ubuntu-latest
+    outputs:
+      npm_version: ${{ steps.resolve.outputs.npm_version }}
+      upstream_version: ${{ steps.resolve.outputs.upstream_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve and validate version
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.npm_version }}
+        run: |
+          set -euo pipefail
+          base_version="$(tr -d '[:space:]' < build/npm-ipass/upstream-version.txt)"
+
+          case "$EVENT_NAME" in
+            push)
+              version="${REF_NAME#v}"
+              ;;
+            workflow_dispatch)
+              version="${INPUT_VERSION:-${base_version}-ipass.1}"
+              ;;
+            pull_request)
+              version="${base_version}-ipass.1"
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          BASE_VERSION="$base_version" VERSION="$version" node <<'NODE'
+          const version = process.env.VERSION;
+          const upstreamVersion = process.env.BASE_VERSION;
+          if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(upstreamVersion)) {
+            throw new Error(`Invalid upstream DWS version ${JSON.stringify(upstreamVersion)}`);
+          }
+          const base = upstreamVersion.replaceAll(".", "\\.");
+          const pattern = new RegExp(`^${base}-ipass\\.[1-9][0-9]*$`);
+          if (!pattern.test(version)) {
+            throw new Error(`Invalid npm version ${JSON.stringify(version)}; expected ${upstreamVersion}-ipass.<positive integer>`);
+          }
+          NODE
+
+          echo "npm_version=$version" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$base_version" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify managed proxy and npm staging
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Test edition configuration
+        env:
+          DWS_PACKAGE_VERSION: v${{ needs.version.outputs.npm_version }}
+        run: go test ./pkg/edition -count=1
+
+      - name: Test managed execution boundaries and affected routing
+        env:
+          DWS_PACKAGE_VERSION: v${{ needs.version.outputs.npm_version }}
+        run: >-
+          go test ./internal/app
+          -run '^(TestManagedProxy.*|TestCrossPlatformCoverageRunnerRemainingRoutingCoverage|TestCrossPlatformCoverageDirectRuntimeRemainingCoverage|TestCrossPlatformCoverageDirectRuntimeCoverage|TestCrossPlatformCoverageAuthRefreshRetryHelpers|TestCrossPlatformCoverageResolveMCPRequestHeadersScopesAndFinalizesAgentMetadata|TestCrossPlatformCoverageAgentMetadataMCPAndPluginScoping)$'
+          -count=1 -timeout=10m
+
+      - name: Test npm staging contract
+        run: node --test test/npm/ipass-release.test.mjs
+
+  release-assets:
+    name: Build finalized DWS release assets
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Fetch the exact upstream baseline tag
+        shell: bash
+        env:
+          UPSTREAM_VERSION: ${{ needs.version.outputs.upstream_version }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags \
+            https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli.git \
+            "+refs/tags/v${UPSTREAM_VERSION}:refs/tags/v${UPSTREAM_VERSION}"
+
+      # post-goreleaser.sh signs both Darwin archives. Fork builds use
+      # rcodesign's ad-hoc mode when no Apple Developer ID secret is present.
+      - name: Install rcodesign
+        shell: bash
+        run: |
+          set -euo pipefail
+          RCS_VERSION="0.29.0"
+          RCS_ARCHIVE_SHA256="dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+          curl -fsSL -o /tmp/rcodesign.tar.gz \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCS_VERSION}/apple-codesign-${RCS_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          printf '%s  %s\n' "$RCS_ARCHIVE_SHA256" /tmp/rcodesign.tar.gz \
+            | sha256sum --check --strict -
+          mkdir -p /tmp/rcodesign
+          tar -xzf /tmp/rcodesign.tar.gz -C /tmp/rcodesign --strip-components=1
+          sudo install -m 0755 /tmp/rcodesign/rcodesign /usr/local/bin/rcodesign
+          rcodesign --version
+
+      - name: Install archive tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y zip unzip
+          fi
+
+      - name: Build all six archives with the upstream GoReleaser contract
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "v2.16.0"
+          args: release --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: v${{ needs.version.outputs.npm_version }}
+          GORELEASER_PREVIOUS_TAG: v${{ needs.version.outputs.upstream_version }}
+
+      - name: Apply upstream post-GoReleaser finalization
+        shell: bash
+        env:
+          DWS_PACKAGE_VERSION: v${{ needs.version.outputs.npm_version }}
+          DWS_RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.version.outputs.npm_version }}
+          DWS_REQUIRE_DEVELOPER_ID_SIGNING: "false"
+        run: ./scripts/release/post-goreleaser.sh
+
+      - name: Verify finalized release artifacts
+        shell: bash
+        env:
+          RELEASE_VERSION: v${{ needs.version.outputs.npm_version }}
+        run: ./scripts/release/verify-release-artifacts.sh "$RELEASE_VERSION"
+
+      - name: Upload finalized release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: dws-release-assets
+          path: |
+            dist/dws-darwin-amd64.tar.gz
+            dist/dws-darwin-arm64.tar.gz
+            dist/dws-linux-amd64.tar.gz
+            dist/dws-linux-arm64.tar.gz
+            dist/dws-windows-amd64.zip
+            dist/dws-windows-arm64.zip
+            dist/dws-skills.zip
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  platform:
+    name: Stage ${{ matrix.platform }} npm binary
+    needs: release-assets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            archive: dws-linux-amd64.tar.gz
+            binary: dws
+            archive_type: tar
+          - platform: linux-arm64
+            archive: dws-linux-arm64.tar.gz
+            binary: dws
+            archive_type: tar
+          - platform: darwin-x64
+            archive: dws-darwin-amd64.tar.gz
+            binary: dws
+            archive_type: tar
+          - platform: darwin-arm64
+            archive: dws-darwin-arm64.tar.gz
+            binary: dws
+            archive_type: tar
+          - platform: win32-x64
+            archive: dws-windows-amd64.zip
+            binary: dws.exe
+            archive_type: zip
+          - platform: win32-arm64
+            archive: dws-windows-arm64.zip
+            binary: dws.exe
+            archive_type: zip
+
+    steps:
+      - name: Download finalized release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: dws-release-assets
+          path: .release/assets
+
+      - name: Verify archive and extract final binary
+        shell: bash
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCHIVE: ${{ matrix.archive }}
+          TARGET_BINARY: ${{ matrix.binary }}
+          ARCHIVE_TYPE: ${{ matrix.archive_type }}
+        run: |
+          set -euo pipefail
+          archive=".release/assets/$TARGET_ARCHIVE"
+          checksums=".release/assets/checksums.txt"
+          test -s "$archive"
+          test -s "$checksums"
+
+          expected="$(awk -v name="$TARGET_ARCHIVE" '$2 == name { print $1 }' "$checksums")"
+          test -n "$expected" || {
+            echo "Missing checksum for $TARGET_ARCHIVE" >&2
+            exit 1
+          }
+          actual="$(sha256sum "$archive" | awk '{ print $1 }')"
+          test "$actual" = "$expected" || {
+            echo "Checksum mismatch for $TARGET_ARCHIVE" >&2
+            exit 1
+          }
+
+          extract_dir=".release/extracted/$TARGET_PLATFORM"
+          artifact_dir=".release/artifacts/binary-$TARGET_PLATFORM"
+          mkdir -p "$extract_dir" "$artifact_dir"
+          if [[ "$ARCHIVE_TYPE" == "zip" ]]; then
+            unzip -q "$archive" -d "$extract_dir"
+          else
+            tar -xzf "$archive" -C "$extract_dir"
+          fi
+
+          source_binary="$(find "$extract_dir" -type f -name "$TARGET_BINARY" -print -quit)"
+          test -n "$source_binary" || {
+            echo "Final binary $TARGET_BINARY is missing from $TARGET_ARCHIVE" >&2
+            exit 1
+          }
+          cp "$source_binary" "$artifact_dir/$TARGET_BINARY"
+          if [[ "$TARGET_BINARY" != *.exe ]]; then
+            chmod 0755 "$artifact_dir/$TARGET_BINARY"
+          fi
+          test -s "$artifact_dir/$TARGET_BINARY"
+
+      - name: Upload final platform binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.platform }}
+          path: .release/artifacts/binary-${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare:
+    name: Pack and verify npm packages
+    needs: [version, platform]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v7
+        with:
+          pattern: binary-*
+          path: .release/artifacts
+
+      - name: Run npm staging tests
+        run: node --test test/npm/ipass-release.test.mjs
+
+      - name: Prepare npm packages
+        env:
+          NPM_VERSION: ${{ needs.version.outputs.npm_version }}
+        run: node scripts/release/prepare-ipass-npm-release.mjs
+
+      - name: Pack every npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release/packs
+
+          package_dirs=(
+            .release/npm/darwin-arm64
+            .release/npm/darwin-x64
+            .release/npm/linux-arm64
+            .release/npm/linux-x64
+            .release/npm/win32-arm64
+            .release/npm/win32-x64
+            .release/npm/root
+          )
+          for package_dir in "${package_dirs[@]}"; do
+            echo "==> $package_dir"
+            npm pack "$package_dir" \
+              --pack-destination .release/packs \
+              --json \
+              --ignore-scripts > .release/pack-result.json
+            node <<'NODE'
+          const result = require("./.release/pack-result.json");
+          if (!Array.isArray(result) || result.length !== 1 || !result[0].filename || !result[0].integrity) {
+            throw new Error("npm pack did not return one package with integrity metadata");
+          }
+          NODE
+          done
+
+          test "$(find .release/packs -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 7
+          root_tarball="$(node -p "require('./.release/pack-result.json')[0].filename")"
+          tar -xOf ".release/packs/$root_tarball" package/package.json > .release/packed-root-package.json
+          node <<'NODE'
+          const manifest = require("./.release/packed-root-package.json");
+          if (manifest.name !== "@guanzhu.me/dingtalk-workspace-cli" || manifest.bin?.dws !== "bin/dws.js") {
+            throw new Error(`Packed root manifest is invalid: ${JSON.stringify({ name: manifest.name, bin: manifest.bin })}`);
+          }
+          if (Object.keys(manifest.optionalDependencies || {}).length !== 6) {
+            throw new Error("Packed root manifest must reference all six platform packages");
+          }
+          NODE
+
+      - name: Upload npm staging
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-staging
+          path: .release/npm
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish platform packages, then root package
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_npm)
+    needs: [version, prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download npm staging
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-staging
+          path: .release/npm
+
+      - name: Validate npm token
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "Missing repository secret NPM_TOKEN." >&2
+            exit 1
+          fi
+          npm whoami --registry https://registry.npmjs.org >/dev/null
+
+      - name: Publish exact version idempotently
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.version.outputs.npm_version }}
+        run: |
+          set -euo pipefail
+
+          visible_exact_version() {
+            local package_name="$1"
+            local observed
+            observed="$(npm view "${package_name}@${VERSION}" version --json --registry https://registry.npmjs.org 2>/dev/null || true)"
+            OBSERVED="$observed" VERSION="$VERSION" node <<'NODE'
+          let observed;
+          try {
+            observed = JSON.parse(process.env.OBSERVED || "null");
+          } catch {
+            process.exit(1);
+          }
+          if (Array.isArray(observed)) observed = observed[0];
+          process.exit(observed === process.env.VERSION ? 0 : 1);
+          NODE
+          }
+
+          wait_until_visible() {
+            local package_name="$1"
+            local delay
+            for delay in 0 2 4 8 16 30; do
+              if (( delay > 0 )); then
+                echo "Waiting ${delay}s for ${package_name}@${VERSION} to become visible..."
+                sleep "$delay"
+              fi
+              if visible_exact_version "$package_name"; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          publish_if_missing() {
+            local package_name="$1"
+            local package_dir="$2"
+            local publish_log
+            publish_log="$(mktemp)"
+
+            if visible_exact_version "$package_name"; then
+              echo "Skipping ${package_name}@${VERSION}: already published."
+              rm -f "$publish_log"
+              return 0
+            fi
+
+            echo "Publishing ${package_name}@${VERSION}..."
+            if npm publish "$package_dir" \
+              --access public \
+              --tag latest \
+              --registry https://registry.npmjs.org >"$publish_log" 2>&1; then
+              cat "$publish_log"
+              rm -f "$publish_log"
+              wait_until_visible "$package_name" || {
+                echo "Published ${package_name}@${VERSION}, but npm did not expose the exact version before timeout." >&2
+                exit 1
+              }
+              return 0
+            fi
+
+            if grep -Eqi 'E409|EPUBLISHCONFLICT|cannot publish over|previously published' "$publish_log"; then
+              echo "npm reported a publish conflict for ${package_name}@${VERSION}; verifying registry state."
+              if wait_until_visible "$package_name"; then
+                echo "Confirmed ${package_name}@${VERSION}; treating the conflict as an idempotent retry."
+                rm -f "$publish_log"
+                return 0
+              fi
+            fi
+
+            cat "$publish_log" >&2
+            rm -f "$publish_log"
+            exit 1
+          }
+
+          for platform in \
+            darwin-arm64 \
+            darwin-x64 \
+            linux-arm64 \
+            linux-x64 \
+            win32-arm64 \
+            win32-x64; do
+            publish_if_missing "${NPM_PACKAGE}-${platform}" ".release/npm/${platform}"
+          done
+
+          for platform in \
+            darwin-arm64 \
+            darwin-x64 \
+            linux-arm64 \
+            linux-x64 \
+            win32-arm64 \
+            win32-x64; do
+            wait_until_visible "${NPM_PACKAGE}-${platform}" || {
+              echo "Required platform package is not visible: ${NPM_PACKAGE}-${platform}@${VERSION}" >&2
+              exit 1
+            }
+          done
+
+          publish_if_missing "$NPM_PACKAGE" .release/npm/root

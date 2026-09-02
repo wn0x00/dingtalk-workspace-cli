@@ -240,20 +240,32 @@ func shouldUseDirectRuntime(invocation executor.Invocation) bool {
 func directRuntimeEndpoint(productID, toolName string) (string, bool) {
 	// Priority 0: env-var override always wins (DINGTALK_<PRODUCT>_MCP_URL).
 	normalized := normalizeDirectRuntimeProductID(productID)
-	for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
-		if candidate == "" {
-			continue
+	if !edition.Get().DisableMCPURLOverrides {
+		for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
+			if candidate == "" {
+				continue
+			}
+			if override, ok := productEndpointOverride(candidate); ok {
+				return override, true
+			}
 		}
-		if override, ok := productEndpointOverride(candidate); ok {
-			return override, true
+	}
+
+	// A managed proxy may own helper-only products such as devapp. Prefer the
+	// exact edition endpoint before considering the open-source hardcoded route.
+	for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
+		if endpoint, ok := editionServerEndpoint(candidate); ok && editionAllowsAnonymousMCP(candidate, endpoint) {
+			return endpoint, true
 		}
 	}
 
 	// Hardcoded built-in: devapp is pinned to the open-platform app-management
 	// MCP server in source (NOT service discovery), per product decision.
-	for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
-		if candidate == devappProductID {
-			return devappMCPEndpoint(), true
+	if !edition.Get().DisableMCPURLOverrides {
+		for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
+			if candidate == devappProductID {
+				return devappMCPEndpoint(), true
+			}
 		}
 	}
 
@@ -287,9 +299,11 @@ func directRuntimeEndpoint(productID, toolName string) (string, bool) {
 
 	// Priority 3: built-in PAT fallback for cold-start paths that run before
 	// discovery/plugin registration has populated the dynamic registry.
-	for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
-		if candidate == defaultPATProductID {
-			return defaultPATMCPEndpoint(), true
+	if !edition.Get().DisableMCPURLOverrides {
+		for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
+			if candidate == defaultPATProductID {
+				return defaultPATMCPEndpoint(), true
+			}
 		}
 	}
 
@@ -305,6 +319,9 @@ func directRuntimeEndpoint(productID, toolName string) (string, bool) {
 }
 
 func hasDirectRuntimeEndpointOverride(productID string) bool {
+	if edition.Get().DisableMCPURLOverrides {
+		return false
+	}
 	normalized := normalizeDirectRuntimeProductID(productID)
 	for _, candidate := range []string{strings.TrimSpace(productID), normalized} {
 		if candidate == "" {

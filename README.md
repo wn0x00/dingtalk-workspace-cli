@@ -1,5 +1,7 @@
 <h1 align="center">DingTalk Workspace CLI (dws)</h1>
 
+> This fork publishes the Yingdao iPaaS managed-authorization edition. See the [managed BASE_URL design, installation, and release guide](./docs/ipass-managed-proxy.md).
+
 <p align="center"><code>dws</code> — DingTalk Workspace on the command line, built for humans and AI agents.</p>
 
 <p align="center">
