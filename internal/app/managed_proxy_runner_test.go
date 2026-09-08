@@ -23,6 +23,9 @@ func TestManagedProxyInvocationSkipsOAuthAndSendsNoTokenHeaders(t *testing.T) {
 	})
 
 	const productID = "managed-proxy-test"
+	t.Setenv(envIPassSessionID, "session-1")
+	t.Setenv(envIPassActiveCallID, "call-1")
+	t.Setenv(envIPassActiveMessageID, "message-1")
 	var endpoint string
 	requestSeen := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +38,15 @@ func TestManagedProxyInvocationSkipsOAuthAndSendsNoTokenHeaders(t *testing.T) {
 		}
 		if got := r.Header.Get("x-user-access-token"); got != "" {
 			t.Errorf("x-user-access-token header leaked: %q", got)
+		}
+		for name, want := range map[string]string{
+			"x-ipass-session-id": "session-1",
+			"x-ipass-call-id":    "call-1",
+			"x-ipass-message-id": "message-1",
+		} {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("%s = %q, want %q", name, got, want)
+			}
 		}
 		var request struct {
 			JSONRPC string `json:"jsonrpc"`

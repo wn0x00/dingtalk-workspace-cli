@@ -90,12 +90,15 @@ const (
 	runtimeContentScanReportOutputEnv = "DWS_RUNTIME_CONTENT_SCAN_REPORT"
 
 	// Environment variables for MCP request headers (passed from caller)
-	envDingtalkAgent     = "DINGTALK_AGENT"
-	envDingtalkTraceID   = "DINGTALK_TRACE_ID"
-	envDingtalkSessionID = "DINGTALK_SESSION_ID"
-	envDingtalkMessageID = "DINGTALK_MESSAGE_ID"
-	envDWSSessionID      = "DWS_SESSION_ID"
-	envRewindSessionID   = "REWIND_SESSION_ID"
+	envDingtalkAgent        = "DINGTALK_AGENT"
+	envDingtalkTraceID      = "DINGTALK_TRACE_ID"
+	envDingtalkSessionID    = "DINGTALK_SESSION_ID"
+	envDingtalkMessageID    = "DINGTALK_MESSAGE_ID"
+	envDWSSessionID         = "DWS_SESSION_ID"
+	envRewindSessionID      = "REWIND_SESSION_ID"
+	envIPassSessionID       = "IPASS_SESSION_ID"
+	envIPassActiveCallID    = "IPASS_ACTIVE_CALL_ID"
+	envIPassActiveMessageID = "IPASS_ACTIVE_MESSAGE_ID"
 
 	// Environment variables for third-party channel integration
 	envDWSChannel = "DWS_CHANNEL"
@@ -631,6 +634,9 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 			tc = r.transport.WithAuth(authToken, resolveMCPRequestHeadersForInvocation(invocation))
 		}
 	}
+	if managedAnonymous {
+		tc = tc.WithAuth(authToken, managedProxyRequestHeaders(tc.ExtraHeaders))
+	}
 
 	callCtx := ctx
 	if r.globalFlags != nil && r.globalFlags.Timeout > 0 {
@@ -785,6 +791,23 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 		response["safety"] = scanReport
 	}
 	return executor.Result{Invocation: invocation, Response: response}, nil
+}
+
+func managedProxyRequestHeaders(base map[string]string) map[string]string {
+	headers := make(map[string]string, len(base)+3)
+	for key, value := range base {
+		headers[key] = value
+	}
+	for _, item := range []struct{ env, header string }{
+		{envIPassSessionID, "x-ipass-session-id"},
+		{envIPassActiveCallID, "x-ipass-call-id"},
+		{envIPassActiveMessageID, "x-ipass-message-id"},
+	} {
+		if value := strings.TrimSpace(os.Getenv(item.env)); value != "" {
+			headers[item.header] = value
+		}
+	}
+	return headers
 }
 
 func (r *runtimeRunner) executeStdioInvocationAtEndpoint(

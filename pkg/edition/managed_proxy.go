@@ -80,6 +80,7 @@ func configureManagedProxyHooks(base *Hooks) *Hooks {
 	})
 
 	allowedEndpoints := managedProxyEndpointAllowlist(staticServers, supplementServers)
+	allowedCommands := managedProxyBusinessCommands(staticServers, supplementServers)
 	visibleProducts := serverIDs(staticServers)
 	previousPreRun := hooks.AfterPersistentPreRun
 	hooks.StaticServers = func() []ServerInfo { return cloneServers(staticServers) }
@@ -98,7 +99,7 @@ func configureManagedProxyHooks(base *Hooks) *Hooks {
 	hooks.TokenProvider = nil
 	hooks.OnAuthError = nil
 	hooks.EnterpriseCredentialHeaders = nil
-	hooks.AfterPersistentPreRun = managedProxyPreRun(previousPreRun, nil)
+	hooks.AfterPersistentPreRun = managedProxyPreRun(previousPreRun, nil, allowedCommands)
 	return &hooks
 }
 
@@ -113,7 +114,7 @@ func managedProxyConfigurationError(hooks *Hooks, configErr error) *Hooks {
 	hooks.DiscoveryURL = ""
 	hooks.DiscoveryHeaders = nil
 	hooks.FallbackServers = nil
-	hooks.AfterPersistentPreRun = managedProxyPreRun(hooks.AfterPersistentPreRun, fmt.Errorf("%s 配置无效: %w", DingTalkCLIBaseURLEnv, configErr))
+	hooks.AfterPersistentPreRun = managedProxyPreRun(hooks.AfterPersistentPreRun, fmt.Errorf("%s 配置无效: %w", DingTalkCLIBaseURLEnv, configErr), nil)
 	return hooks
 }
 
@@ -210,12 +211,12 @@ func managedProxyEndpointAllowlist(groups ...[]ServerInfo) map[string]map[string
 	return result
 }
 
-func managedProxyPreRun(previous func(*cobra.Command, []string) error, configErr error) func(*cobra.Command, []string) error {
+func managedProxyPreRun(previous func(*cobra.Command, []string) error, configErr error, allowedCommands map[string]bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		if configErr != nil {
 			return configErr
 		}
-		if err := validateManagedProxyInvocation(cmd); err != nil {
+		if err := validateManagedProxyInvocationWithAllowedCommands(cmd, allowedCommands); err != nil {
 			return err
 		}
 		if previous != nil {
@@ -226,6 +227,10 @@ func managedProxyPreRun(previous func(*cobra.Command, []string) error, configErr
 }
 
 func validateManagedProxyInvocation(cmd *cobra.Command) error {
+	return validateManagedProxyInvocationWithAllowedCommands(cmd, managedProxyBusinessCommands(openStaticServers(), openSupplementServers()))
+}
+
+func validateManagedProxyInvocationWithAllowedCommands(cmd *cobra.Command, allowedCommands map[string]bool) error {
 	for _, name := range []string{"token", "profile"} {
 		if rootFlagProvided(cmd, name) {
 			return fmt.Errorf("iPaaS 托管模式不允许使用 --%s", name)
@@ -237,21 +242,53 @@ func validateManagedProxyInvocation(cmd *cobra.Command) error {
 		}
 	}
 	if top := topLevelCommand(cmd); top != nil {
-		switch top.Name() {
-		case "api", "auth", "profile", "mcp":
-			return fmt.Errorf("iPaaS 托管模式不使用本地 dws %s 身份或凭证管理", top.Name())
-		case "event":
-			return errors.New("iPaaS 托管模式暂不支持 dws event；该长连接协议不经过 MCP 代理")
-		case "skill":
-			switch cmd.Name() {
-			case "get", "search", "install":
-				return errors.New("iPaaS 托管模式不使用本地 OAuth 访问钉钉技能市场；内置技能请使用 dws skill setup")
-			}
-		case "upgrade":
-			return errors.New("iPaaS 托管版本不能通过 dws upgrade 替换；请使用 npm 更新定制包")
+		// Only the fixed MCP products owned by this managed edition may run.
+		// Utility commands are deliberately not a deny-list: a newly added local
+		// command must be rejected by default until it is explicitly backed by a
+		// reviewed proxy endpoint. `schema` is the sole local read-only exception;
+		// OC skills use it to discover the argument contract of an allowed product.
+		if top.Name() == "schema" {
+			return nil
 		}
+		if managedProxyLocalCommands[top.Name()] {
+			return fmt.Errorf("iPaaS 托管模式不提供本地 dws %s 命令", top.Name())
+		}
+		if allowedCommands[top.Name()] {
+			return nil
+		}
+		return fmt.Errorf("iPaaS 托管模式仅允许固定钉钉 MCP 业务命令；dws %s 不可用", top.Name())
 	}
 	return nil
+}
+
+// managedProxyLocalCommands are local management, credential, diagnostics and
+// extension entry points. They remain blocked even when a business MCP server
+// happens to use the same prefix (for example calendar's `event` prefix).
+var managedProxyLocalCommands = map[string]bool{
+	"api": true, "audit": true, "auth": true, "cache": true, "completion": true,
+	"config": true, "doctor": true, "event": true, "mcp": true, "plugin": true,
+	"profile": true, "recovery": true, "shortcut": true, "skill": true, "upgrade": true,
+}
+
+// managedProxyBusinessCommands derives command names from the exact static
+// and supplemental endpoints that configureManagedProxyHooks has rewritten to
+// OC. Prefixes are included because some compatibility commands address a
+// product through its reviewed prefix rather than its canonical server ID.
+func managedProxyBusinessCommands(groups ...[]ServerInfo) map[string]bool {
+	allowed := make(map[string]bool)
+	for _, servers := range groups {
+		for _, server := range servers {
+			if id := strings.TrimSpace(server.ID); id != "" {
+				allowed[id] = true
+			}
+			for _, prefix := range server.Prefixes {
+				if name := strings.TrimSpace(prefix); name != "" {
+					allowed[name] = true
+				}
+			}
+		}
+	}
+	return allowed
 }
 
 func topLevelCommand(cmd *cobra.Command) *cobra.Command {

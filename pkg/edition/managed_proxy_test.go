@@ -167,8 +167,18 @@ func TestValidateManagedProxyInvocationBlocksCredentialAndNonMCPPaths(t *testing
 	setup := &cobra.Command{Use: "setup"}
 	skill.AddCommand(setup)
 	_ = root
-	if err := validateManagedProxyInvocation(setup); err != nil {
-		t.Fatalf("local skill setup was rejected: %v", err)
+	if err := validateManagedProxyInvocation(setup); err == nil {
+		t.Fatal("local skill setup was accepted")
+	}
+
+	_, schema := managedProxyCommandTree("schema")
+	if err := validateManagedProxyInvocation(schema); err != nil {
+		t.Fatalf("schema command was rejected: %v", err)
+	}
+
+	_, utility := managedProxyCommandTree("doctor")
+	if err := validateManagedProxyInvocation(utility); err == nil {
+		t.Fatal("unreviewed utility command was accepted")
 	}
 }
 
