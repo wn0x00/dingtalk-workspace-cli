@@ -100,6 +100,7 @@ type APIClient struct {
 	BaseURL    string
 	HTTPClient *http.Client
 	Token      string
+	managed    bool
 }
 
 // NewClient creates an APIClient with sensible defaults.
@@ -133,6 +134,11 @@ func (c *APIClient) Do(ctx context.Context, req RawAPIRequest) (*RawAPIResponse,
 	// Security: verify target host before sending token.
 	if err := ValidateTargetHost(fullURL); err != nil {
 		return nil, err
+	}
+	if c.managed {
+		if err := ValidateManagedTarget(fullURL); err != nil {
+			return nil, err
+		}
 	}
 
 	var bodyReader io.Reader
@@ -175,7 +181,9 @@ func (c *APIClient) Do(ctx context.Context, req RawAPIRequest) (*RawAPIResponse,
 	}
 
 	// Set headers and auth based on API style.
-	if IsLegacyAPI(fullURL) {
+	if c.managed {
+		// Credentials exist only in iPaaS; do not even add an empty token query.
+	} else if IsLegacyAPI(fullURL) {
 		// Legacy API: token goes in query parameter.
 		parsed, _ := url.Parse(fullURL)
 		q := parsed.Query()

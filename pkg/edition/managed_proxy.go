@@ -85,6 +85,7 @@ func configureManagedProxyHooks(base *Hooks) *Hooks {
 	hooks.StaticServers = func() []ServerInfo { return cloneServers(staticServers) }
 	hooks.SupplementServers = func() []ServerInfo { return cloneServers(supplementServers) }
 	hooks.VisibleProducts = func() []string { return append([]string(nil), visibleProducts...) }
+	hooks.ManagedOpenAPIBaseURL = proxyBase.String()
 	hooks.AllowAnonymousMCP = func(productID, endpoint string) bool {
 		endpoints := allowedEndpoints[strings.TrimSpace(productID)]
 		return endpoints != nil && endpoints[endpoint]
@@ -107,6 +108,7 @@ func managedProxyConfigurationError(hooks *Hooks, configErr error) *Hooks {
 	hooks.SupplementServers = func() []ServerInfo { return nil }
 	hooks.VisibleProducts = func() []string { return nil }
 	hooks.AllowAnonymousMCP = nil
+	hooks.ManagedOpenAPIBaseURL = ""
 	hooks.TokenProvider = nil
 	hooks.OnAuthError = nil
 	hooks.EnterpriseCredentialHeaders = nil
@@ -238,7 +240,7 @@ func validateManagedProxyInvocation(cmd *cobra.Command) error {
 	}
 	if top := topLevelCommand(cmd); top != nil {
 		switch top.Name() {
-		case "api", "auth", "profile", "mcp":
+		case "auth", "profile", "mcp":
 			return fmt.Errorf("iPaaS 托管模式不使用本地 dws %s 身份或凭证管理", top.Name())
 		case "event":
 			return errors.New("iPaaS 托管模式暂不支持 dws event；该长连接协议不经过 MCP 代理")

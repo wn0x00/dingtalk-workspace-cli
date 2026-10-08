@@ -50,11 +50,32 @@ Adapter 必须从可信的服务端会话、沙箱身份或请求上下文解析
 - `DINGTALK_<PRODUCT>_MCP_URL` 覆盖被禁用，避免业务请求绕开 Adapter。
 - 远程代理必须使用 HTTPS；HTTP 只允许 `localhost` 或回环 IP，便于本地联调。
 - BASE_URL 不允许包含用户名、密码、查询参数或 URL 片段。
-- `dws auth`、`dws profile`、`dws api`、`dws mcp`、`dws event` 和 `dws upgrade` 在托管模式下拒绝执行。它们分别属于本地身份管理、直接 OpenAPI、返回或直连身份型动态 MCP 地址、长连接事件或官方二进制自更新，不属于本方案的固定路由 MCP 业务资源链路。
+- `dws api` 也通过相同 BASE_URL 转发：新版 OpenAPI 使用 `/openapi/api/<path>`，旧版使用 `/openapi/oapi/<path>`，其中 `<path>` 不带开头的 `/`。CLI 不读取本地应用凭据或 Token；请求使用何种身份及授权由平台配置决定。
+- `dws auth`、`dws profile`、`dws mcp`、`dws event` 和 `dws upgrade` 在托管模式下拒绝执行。它们分别属于本地身份管理、返回或直连身份型动态 MCP 地址、长连接事件或官方二进制自更新，不属于本方案的固定代理路由。
 - `dws skill get/search/install` 会访问钉钉技能市场并读取本地 OAuth，因此被禁用；只操作内置文件的 `dws skill setup` 仍可使用。
 - 未设置 BASE_URL 时保持上游 DWS 的原始授权和调用行为。
 
 Adapter 返回 401、403 或业务权限错误时，DWS 会直接返回该错误，不会回退到另一位用户的本地 Token，也不会触发本地 OAuth 刷新。
+
+## 托管 OpenAPI
+
+同一套命令在没有 BASE_URL 时仍采用原生应用凭据调用；设置 BASE_URL 后不需要 `dws auth login`、`DWS_CLIENT_ID`、`DWS_CLIENT_SECRET` 或 `--token`。例如：
+
+```bash
+dws api GET /v1.0/microApp/allApps
+dws api POST /topapi/v2/user/get --base-url https://oapi.dingtalk.com --data '{"userid":"example-user"}'
+```
+
+当 BASE_URL 是 `https://adapter.example.com/dingtalk`，以上请求分别发送到：
+
+```text
+https://adapter.example.com/dingtalk/openapi/api/v1.0/microApp/allApps
+https://adapter.example.com/dingtalk/openapi/oapi/topapi/v2/user/get
+```
+
+`--base-url` 仍表示钉钉逻辑目标，只允许官方新旧 OpenAPI 域名，不填写 Adapter 地址。代理不改变 `--params`、JSON、分页、multipart 上传或响应输出的格式。CLI 不携带钉钉 Token、Cookie、调用者指定的授权 ID；iPaaS Action 从 `context.property.auth.outputs.token` 取平台授权的 Token，新域名注入 `x-acs-dingtalk-access-token`，旧域名注入 `access_token`。不同协议必须绑定兼容的授权，MCP 用户凭证不保证可用于应用接口。
+
+托管 OpenAPI 禁止调用者在查询参数中覆盖凭据，也禁止调用 Token/OAuth 换取端点。不跟随重定向、不自动重试业务请求、不直连回退。Token 获取与缓存仅由平台管理；同一宿主多用户时授权隔离仍由 Adapter 可信身份映射和 iPaaS 授权记录保证。
 
 ## npm 安装
 

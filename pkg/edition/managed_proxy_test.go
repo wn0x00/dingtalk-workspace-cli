@@ -28,6 +28,9 @@ func TestConfigureManagedProxyHooksRewritesAndOwnsExactEndpoints(t *testing.T) {
 	if hooks.TokenProvider != nil || hooks.OnAuthError != nil || hooks.AllowAnonymousMCP == nil {
 		t.Fatalf("managed auth hooks = token %v on-error %v anonymous %v", hooks.TokenProvider != nil, hooks.OnAuthError != nil, hooks.AllowAnonymousMCP != nil)
 	}
+	if hooks.ManagedOpenAPIBaseURL != "https://adapter.example.com/v1/dingtalk/mcp" {
+		t.Fatalf("managed OpenAPI base = %q", hooks.ManagedOpenAPIBaseURL)
+	}
 
 	static := hooks.StaticServers()
 	if got := static[0].Endpoint; got != "https://adapter.example.com/v1/dingtalk/mcp/server/aitable" {
@@ -127,7 +130,6 @@ func TestValidateManagedProxyInvocationBlocksCredentialAndNonMCPPaths(t *testing
 		{name: "client-secret", command: "aitable", flag: "client-secret", value: "caller-secret"},
 		{name: "auth", command: "auth"},
 		{name: "profile", command: "profile"},
-		{name: "api", command: "api"},
 		{name: "mcp", command: "mcp"},
 		{name: "event", command: "event"},
 		{name: "upgrade", command: "upgrade"},
@@ -152,6 +154,10 @@ func TestValidateManagedProxyInvocationBlocksCredentialAndNonMCPPaths(t *testing
 	_, business := managedProxyCommandTree("aitable")
 	if err := validateManagedProxyInvocation(business); err != nil {
 		t.Fatalf("business command was rejected: %v", err)
+	}
+	_, api := managedProxyCommandTree("api")
+	if err := validateManagedProxyInvocation(api); err != nil {
+		t.Fatalf("managed OpenAPI command was rejected: %v", err)
 	}
 
 	for _, name := range []string{"get", "search", "install"} {

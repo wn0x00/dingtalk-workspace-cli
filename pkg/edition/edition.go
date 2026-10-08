@@ -150,6 +150,9 @@ type Hooks struct {
 	// is evaluated at the execution boundary after endpoint resolution. It must
 	// fail closed for every endpoint the edition does not own.
 	AllowAnonymousMCP func(productID, endpoint string) bool
+	// ManagedOpenAPIBaseURL routes raw OpenAPI requests through the managed
+	// proxy without resolving local application credentials or vendor tokens.
+	ManagedOpenAPIBaseURL string
 
 	// --- discovery ---
 

@@ -26,6 +26,7 @@ import (
 	authpkg "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/auth"
 	apperrors "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/errors"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/output"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 	"github.com/spf13/cobra"
 )
 
@@ -79,6 +80,8 @@ oapi.dingtalk.com:
 新旧 Client Secret 槽位值冲突时拒绝调用并要求重新登录，不猜测正确值。
 隐藏 --token 仅临时使用调用方提供的 App Token，不持久化、不自动刷新。
 通过 MCP 默认凭证登录获取的加密 token 不支持 raw API 调用。
+设置 DINGTALK_CLI_BASE_URL 后，请求由影刀托管代理转发；不读取本地应用凭证或 Token。
+托管调用所用身份由平台授权决定；不允许调用者注入凭据或访问 Token/OAuth 端点。
 
 示例:
   # === api.dingtalk.com ===
@@ -200,6 +203,15 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 	if err := apiclient.ValidateTargetHost(fullURL); err != nil {
 		return apperrors.NewValidation(err.Error())
 	}
+	managedBase := edition.Get().ManagedOpenAPIBaseURL
+	if managedBase != "" {
+		if gf.Token != "" || gf.ClientID != "" || gf.ClientSecret != "" {
+			return apperrors.NewValidation("iPaaS 托管模式不允许提供本地凭据")
+		}
+		if err := apiclient.ValidateManagedTarget(fullURL); err != nil {
+			return apperrors.NewValidation(err.Error())
+		}
+	}
 
 	// 6. Dry-run never reads stdin/@file/upload bytes, Keychain, or the network.
 	if gf.DryRun {
@@ -208,6 +220,11 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 		if !apiclient.IsDeferredInput(af.params) {
 			params, err = apiclient.ParseJSONMap(af.params, "--params", nil)
 			if err != nil {
+				return apperrors.NewValidation(err.Error())
+			}
+		}
+		if managedBase != "" {
+			if err := apiclient.ValidateManagedParams(params); err != nil {
 				return apperrors.NewValidation(err.Error())
 			}
 		}
@@ -237,6 +254,11 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 	if err != nil {
 		return apperrors.NewValidation(err.Error())
 	}
+	if managedBase != "" {
+		if err := apiclient.ValidateManagedParams(params); err != nil {
+			return apperrors.NewValidation(err.Error())
+		}
+	}
 
 	// 8. Parse --data.
 	body, err := apiclient.ParseOptionalBody(method, af.data, os.Stdin)
@@ -253,15 +275,7 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 		fileUpload.Reader = os.Stdin
 	}
 
-	// 9. Resolve app-level token (with timeout).
-	tokenCtx, tokenCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer tokenCancel()
-	token, err := resolveRawAPIToken(tokenCtx, gf.Token, gf.ClientID, gf.ClientSecret)
-	if err != nil {
-		return err
-	}
-
-	// 10. Build request.
+	// 9. Build request. Managed mode must branch before touching credentials.
 	req := apiclient.RawAPIRequest{
 		Method: method,
 		Path:   path,
@@ -270,10 +284,22 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 		File:   fileUpload,
 	}
 
-	baseURL := af.baseURL
-
-	// 11. Create client with timeout.
-	client := newRawAPIClient(token, baseURL)
+	// 10. Create the client without a local token in managed mode.
+	var client *apiclient.APIClient
+	if managedBase != "" {
+		client, err = apiclient.NewManagedClient(managedBase, af.baseURL)
+		if err != nil {
+			return apperrors.NewValidation(err.Error())
+		}
+	} else {
+		tokenCtx, tokenCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer tokenCancel()
+		token, tokenErr := resolveRawAPIToken(tokenCtx, gf.Token, gf.ClientID, gf.ClientSecret)
+		if tokenErr != nil {
+			return tokenErr
+		}
+		client = newRawAPIClient(token, af.baseURL)
+	}
 	if gf.Timeout > 0 {
 		client.HTTPClient.Timeout = time.Duration(gf.Timeout) * time.Second
 	}

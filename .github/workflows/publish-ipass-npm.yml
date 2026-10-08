@@ -114,8 +114,11 @@ jobs:
           DWS_PACKAGE_VERSION: v${{ needs.version.outputs.npm_version }}
         run: >-
           go test ./internal/app
-          -run '^(TestManagedProxy.*|TestCrossPlatformCoverageRunnerRemainingRoutingCoverage|TestCrossPlatformCoverageDirectRuntimeRemainingCoverage|TestCrossPlatformCoverageDirectRuntimeCoverage|TestCrossPlatformCoverageAuthRefreshRetryHelpers|TestCrossPlatformCoverageResolveMCPRequestHeadersScopesAndFinalizesAgentMetadata|TestCrossPlatformCoverageAgentMetadataMCPAndPluginScoping)$'
+          -run '^(TestManagedProxy.*|TestCrossPlatformCoverageManagedAPI.*|TestCrossPlatformCoverageRunnerRemainingRoutingCoverage|TestCrossPlatformCoverageDirectRuntimeRemainingCoverage|TestCrossPlatformCoverageDirectRuntimeCoverage|TestCrossPlatformCoverageAuthRefreshRetryHelpers|TestCrossPlatformCoverageResolveMCPRequestHeadersScopesAndFinalizesAgentMetadata|TestCrossPlatformCoverageAgentMetadataMCPAndPluginScoping)$'
           -count=1 -timeout=10m
+
+      - name: Test OpenAPI request and managed transport contracts
+        run: go test ./internal/apiclient -count=1 -timeout=5m
 
       - name: Test npm staging contract
         run: node --test test/npm/ipass-release.test.mjs
