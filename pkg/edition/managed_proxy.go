@@ -250,6 +250,13 @@ func validateManagedProxyInvocationWithAllowedCommands(cmd *cobra.Command, allow
 		if top.Name() == "schema" {
 			return nil
 		}
+		// `api` runs through the /server/raw tunnel: the CLI never holds app
+		// credentials in managed mode; the connector-side script picks the app
+		// token from the connection's auth outputs and forwards to
+		// api/oapi.dingtalk.com. Same session-scoped proxy audit trail as MCP.
+		if top.Name() == "api" {
+			return nil
+		}
 		if managedProxyLocalCommands[top.Name()] {
 			return fmt.Errorf("iPaaS 托管模式不提供本地 dws %s 命令", top.Name())
 		}
@@ -265,7 +272,7 @@ func validateManagedProxyInvocationWithAllowedCommands(cmd *cobra.Command, allow
 // extension entry points. They remain blocked even when a business MCP server
 // happens to use the same prefix (for example calendar's `event` prefix).
 var managedProxyLocalCommands = map[string]bool{
-	"api": true, "audit": true, "auth": true, "cache": true, "completion": true,
+	"audit": true, "auth": true, "cache": true, "completion": true,
 	"config": true, "doctor": true, "event": true, "mcp": true, "plugin": true,
 	"profile": true, "recovery": true, "shortcut": true, "skill": true, "upgrade": true,
 }

@@ -16,10 +16,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +32,7 @@ import (
 	apperrors "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/errors"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/output"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/testseam"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 )
 
 func TestParseQueryStringToJSON(t *testing.T) {
@@ -125,6 +128,96 @@ func TestCrossPlatformCoverageRunAPIQueryStringBlocked(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "/v1.0/calendar/users/me/events") {
 		t.Errorf("expected clean path in suggestion, got: %s", errMsg)
+	}
+}
+
+func TestCrossPlatformCoverageManagedTunnelForwardsRawRequest(t *testing.T) {
+	providerCalled := false
+	oldProvider := newAppTokenProvider
+	t.Cleanup(func() { newAppTokenProvider = oldProvider })
+	newAppTokenProvider = func(_, _, _ string) appTokenGetter {
+		return failingAppTokenGetter{called: &providerCalled}
+	}
+
+	var seenRPC map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/server/raw" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusBadRequest)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &seenRPC); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		inner := map[string]any{
+			"status":     200,
+			"headers":    map[string]string{"content-type": "application/json"},
+			"bodyBase64": base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`)),
+		}
+		innerText, _ := json.Marshal(inner)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      3,
+			"result": map[string]any{
+				"content": []map[string]string{{"type": "text", "text": string(innerText)}},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(edition.DingTalkCLIBaseURLEnv, server.URL)
+
+	gf := &GlobalFlags{}
+	cmd := newAPICommand(gf)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"POST", "/v1.0/example/resource", "--data", `{"k":"v"}`})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("managed tunnel call failed: %v\nstderr=%s", err, stderr.String())
+	}
+	if providerCalled {
+		t.Fatal("managed tunnel resolved local app credentials")
+	}
+	if !strings.Contains(stdout.String(), `"ok"`) {
+		t.Fatalf("tunnel output missing business payload: %s", stdout.String())
+	}
+	if seenRPC["method"] != "tools/call" {
+		t.Fatalf("tunnel rpc method = %v", seenRPC["method"])
+	}
+	params, _ := seenRPC["params"].(map[string]any)
+	if params["name"] != "dws_raw_api" {
+		t.Fatalf("tunnel tool name = %v", params["name"])
+	}
+	arguments, _ := params["arguments"].(map[string]any)
+	if arguments["httpMethod"] != "POST" || arguments["targetPath"] != "/v1.0/example/resource" {
+		t.Fatalf("tunnel arguments = %#v", arguments)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(arguments["bodyBase64"].(string)))
+	if err != nil || string(decoded) != `{"k":"v"}` {
+		t.Fatalf("tunnel body = %q err=%v", decoded, err)
+	}
+}
+
+func TestCrossPlatformCoverageManagedTunnelSurfacesConnectorErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      3,
+			"error":   map[string]any{"code": -32003, "message": "connector app token missing"},
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(edition.DingTalkCLIBaseURLEnv, server.URL)
+
+	gf := &GlobalFlags{}
+	cmd := newAPICommand(gf)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"GET", "/v1.0/example/resource"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "connector app token missing") {
+		t.Fatalf("tunnel error = %v", err)
 	}
 }
 

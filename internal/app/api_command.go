@@ -14,10 +14,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -26,6 +30,7 @@ import (
 	authpkg "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/auth"
 	apperrors "github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/errors"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/output"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 	"github.com/spf13/cobra"
 )
 
@@ -253,7 +258,18 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 		fileUpload.Reader = os.Stdin
 	}
 
-	// 9. Resolve app-level token (with timeout).
+	// 9. Managed iPaaS proxy mode: tunnel the raw request through the
+	// connector-side /server/raw JSON-RPC endpoint. The sandbox never holds
+	// Client ID/Secret; the connector script exchanges the configured app
+	// credential for an app token and forwards to api/oapi.dingtalk.com.
+	if managedBase := strings.TrimSpace(os.Getenv(edition.DingTalkCLIBaseURLEnv)); managedBase != "" {
+		if af.pageAll {
+			return apperrors.NewValidation("iPaaS 托管模式暂不支持 --page-all 自动翻页；请显式传参逐页调用")
+		}
+		return runManagedTunnelAPI(ctx, cmd, gf, managedBase, method, path, params, body, fileUpload)
+	}
+
+	// 10. Resolve app-level token (with timeout).
 	tokenCtx, tokenCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer tokenCancel()
 	token, err := resolveRawAPIToken(tokenCtx, gf.Token, gf.ClientID, gf.ClientSecret)
@@ -261,7 +277,7 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 		return err
 	}
 
-	// 10. Build request.
+	// 11. Build request.
 	req := apiclient.RawAPIRequest{
 		Method: method,
 		Path:   path,
@@ -272,13 +288,13 @@ func runAPI(cmd *cobra.Command, args []string, gf *GlobalFlags, af *apiFlags) er
 
 	baseURL := af.baseURL
 
-	// 11. Create client with timeout.
+	// 12. Create client with timeout.
 	client := newRawAPIClient(token, baseURL)
 	if gf.Timeout > 0 {
 		client.HTTPClient.Timeout = time.Duration(gf.Timeout) * time.Second
 	}
 
-	// 12. Execute request (with or without pagination).
+	// 13. Execute request (with or without pagination).
 	format := output.Format(gf.Format)
 	respOpts := apiclient.ResponseOptions{
 		OutputPath: gf.Output,
@@ -421,4 +437,181 @@ func classifyRawAPIAppConfigError(err error) error {
 	default:
 		return apperrors.NewAuth(fmt.Sprintf("解析本地应用凭证失败: %v", err))
 	}
+}
+
+const (
+	managedTunnelServerPath        = "/server/raw"
+	managedTunnelToolName          = "dws_raw_api"
+	managedTunnelMaxResponseBytes  = 64 << 20 // 隧道信封上限（含 base64 膨胀）
+	managedTunnelErrorSnippetLimit = 512
+)
+
+// managedTunnelFileArg carries one multipart file through the JSON-RPC tunnel.
+type managedTunnelFileArg struct {
+	Field    string `json:"field,omitempty"`
+	FileName string `json:"fileName,omitempty"`
+	Base64   string `json:"base64"`
+}
+
+// runManagedTunnelAPI forwards a raw OpenAPI request through the managed
+// iPaaS proxy as a JSON-RPC tools/call on the /server/raw endpoint. App-token
+// exchange happens connector-side; the CLI never sees app credentials.
+func runManagedTunnelAPI(ctx context.Context, cmd *cobra.Command, gf *GlobalFlags, managedBase, method, path string, params map[string]any, body any, fileUpload *apiclient.FileUpload) error {
+	arguments := map[string]any{
+		"httpMethod": method,
+		"targetPath": path,
+	}
+	if len(params) > 0 {
+		arguments["query"] = params
+	}
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return apperrors.NewValidation(fmt.Sprintf("序列化请求体失败: %v", err))
+		}
+		arguments["bodyBase64"] = base64.StdEncoding.EncodeToString(data)
+	}
+	if fileUpload != nil {
+		fileArg, err := readManagedTunnelFile(fileUpload)
+		if err != nil {
+			return err
+		}
+		arguments["file"] = fileArg
+	}
+
+	rpcPayload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      managedTunnelToolName,
+			"arguments": arguments,
+		},
+	})
+	if err != nil {
+		return apperrors.NewInternal(fmt.Sprintf("构建隧道请求失败: %v", err))
+	}
+
+	endpoint := strings.TrimRight(managedBase, "/") + managedTunnelServerPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rpcPayload))
+	if err != nil {
+		return apperrors.NewInternal(fmt.Sprintf("构建隧道请求失败: %v", err))
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	for name, value := range managedProxyRequestHeaders(nil) {
+		httpReq.Header.Set(name, value)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	if gf.Timeout > 0 {
+		client.Timeout = time.Duration(gf.Timeout) * time.Second
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return apperrors.NewAPI(fmt.Sprintf("托管 raw API 隧道请求失败: %v", err))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, managedTunnelMaxResponseBytes))
+	if err != nil {
+		return apperrors.NewAPI(fmt.Sprintf("读取隧道响应失败: %v", err))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return apperrors.NewAPI(fmt.Sprintf("托管 raw API 隧道返回 HTTP %d: %s", resp.StatusCode, truncateManagedTunnelSnippet(respBytes)))
+	}
+
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Result *struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		return apperrors.NewAPI(fmt.Sprintf("解析隧道响应失败: %v；响应片段: %s", err, truncateManagedTunnelSnippet(respBytes)))
+	}
+	if envelope.Error != nil {
+		return apperrors.NewAPI(fmt.Sprintf("托管 raw API 隧道错误 (code %d): %s", envelope.Error.Code, envelope.Error.Message))
+	}
+	if envelope.Result == nil || len(envelope.Result.Content) == 0 || strings.TrimSpace(envelope.Result.Content[0].Text) == "" {
+		return apperrors.NewInternal("托管 raw API 隧道响应缺少 result content")
+	}
+
+	var rawEnvelope struct {
+		Status     int               `json:"status"`
+		Headers    map[string]string `json:"headers"`
+		BodyBase64 string            `json:"bodyBase64"`
+	}
+	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &rawEnvelope); err != nil {
+		return apperrors.NewAPI(fmt.Sprintf("解析隧道响应信封失败: %v", err))
+	}
+	if rawEnvelope.Status < 100 || rawEnvelope.Status > 599 || rawEnvelope.BodyBase64 == "" {
+		return apperrors.NewAPI("托管 raw API 隧道响应信封不合法（缺少 status 或 bodyBase64）")
+	}
+	bodyBytes, err := base64.StdEncoding.DecodeString(rawEnvelope.BodyBase64)
+	if err != nil {
+		return apperrors.NewAPI(fmt.Sprintf("解码隧道响应体失败: %v", err))
+	}
+
+	header := http.Header{}
+	for name, value := range rawEnvelope.Headers {
+		header.Set(name, value)
+	}
+
+	respOpts := apiclient.ResponseOptions{
+		OutputPath: gf.Output,
+		Format:     output.Format(gf.Format),
+		JqExpr:     gf.JQ,
+		Fields:     gf.Fields,
+		Out:        cmd.OutOrStdout(),
+		ErrOut:     cmd.ErrOrStderr(),
+	}
+	rawResp := &apiclient.RawAPIResponse{
+		StatusCode: rawEnvelope.Status,
+		Header:     header,
+		BodyReader: io.NopCloser(bytes.NewReader(bodyBytes)),
+	}
+	if err := apiclient.HandleResponse(rawResp, respOpts); err != nil {
+		var responseErr *apiclient.ResponseError
+		if errors.As(err, &responseErr) {
+			return apperrors.NewAPI(err.Error())
+		}
+		return err
+	}
+	return nil
+}
+
+func readManagedTunnelFile(fileUpload *apiclient.FileUpload) (managedTunnelFileArg, error) {
+	var data []byte
+	var err error
+	if fileUpload.Reader != nil {
+		data, err = io.ReadAll(fileUpload.Reader)
+	} else {
+		data, err = os.ReadFile(fileUpload.Path)
+	}
+	if err != nil {
+		return managedTunnelFileArg{}, apperrors.NewValidation(fmt.Sprintf("读取上传文件失败: %v", err))
+	}
+	return managedTunnelFileArg{
+		Field:    fileUpload.FieldName,
+		FileName: fileUpload.FileName,
+		Base64:   base64.StdEncoding.EncodeToString(data),
+	}, nil
+}
+
+func truncateManagedTunnelSnippet(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if len(text) > managedTunnelErrorSnippetLimit {
+		return text[:managedTunnelErrorSnippetLimit] + "…"
+	}
+	if text == "" {
+		return "(空响应)"
+	}
+	return text
 }

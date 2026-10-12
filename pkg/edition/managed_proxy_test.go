@@ -127,7 +127,6 @@ func TestValidateManagedProxyInvocationBlocksCredentialAndNonMCPPaths(t *testing
 		{name: "client-secret", command: "aitable", flag: "client-secret", value: "caller-secret"},
 		{name: "auth", command: "auth"},
 		{name: "profile", command: "profile"},
-		{name: "api", command: "api"},
 		{name: "mcp", command: "mcp"},
 		{name: "event", command: "event"},
 		{name: "upgrade", command: "upgrade"},
@@ -174,6 +173,11 @@ func TestValidateManagedProxyInvocationBlocksCredentialAndNonMCPPaths(t *testing
 	_, schema := managedProxyCommandTree("schema")
 	if err := validateManagedProxyInvocation(schema); err != nil {
 		t.Fatalf("schema command was rejected: %v", err)
+	}
+
+	_, api := managedProxyCommandTree("api")
+	if err := validateManagedProxyInvocation(api); err != nil {
+		t.Fatalf("api command was rejected: %v", err)
 	}
 
 	_, utility := managedProxyCommandTree("doctor")
